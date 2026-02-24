@@ -39,7 +39,7 @@ class CausalSelfAttention(nn.Module):
     attention = top / bottom
 
     seqLen = query.size(-2)
-    mask = torch.triu(torch.ones(seqLen, seqLen, device=query.device), diagonal=1)
+    mask = torch.triu(torch.ones(seqLen, seqLen, device=query.device), diagonal=1) * -1e10
     attention = attention + mask
 
     weights = torch.softmax(attention, dim=-1)
