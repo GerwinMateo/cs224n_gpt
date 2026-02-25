@@ -67,7 +67,14 @@ class GPT2SentimentClassifier(torch.nn.Module):
     ###       HINT: You should consider what is an appropriate return value given that
     ###       the training loop currently uses F.cross_entropy as the loss function.
     ### YOUR CODE HERE
-    raise NotImplementedError
+    # Get contextualized token representations.
+    gpt_outputs = self.gpt(input_ids, attention_mask)
+    # Use the representation of the final non-padding token for sentence sentiment.
+    last_token = gpt_outputs['last_token']
+    # Convert that representation into one score per sentiment class.
+    last_token = self.dropout(last_token)
+    logits = self.classifier(last_token)
+    return logits
 
 
 
