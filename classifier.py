@@ -55,7 +55,9 @@ class GPT2SentimentClassifier(torch.nn.Module):
 
     ### TODO: Create any instance variables you need to classify the sentiment of BERT embeddings.
     ### YOUR CODE HERE
-    raise NotImplementedError
+    # these layers turn GPT's final token representation into sentiment scores.
+    self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
+    self.classifier = torch.nn.Linear(config.hidden_size, config.num_labels)
 
 
   def forward(self, input_ids, attention_mask):
