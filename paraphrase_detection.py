@@ -50,7 +50,9 @@ class ParaphraseGPT(nn.Module):
 
   def __init__(self, args):
     super().__init__()
+    # encoder backbone
     self.gpt = GPT2Model.from_pretrained(model=args.model_size, d=args.d, l=args.l, num_heads=args.num_heads)
+    # Lightweight task head that maps one sentence-pair representation -> 2 classes (not-paraphrase/paraphrase).
     self.paraphrase_detection_head = nn.Linear(args.d, 2)  # Paraphrase detection has two outputs: 1 (yes) or 0 (no).
 
     # By default, fine-tune the full model.
@@ -72,7 +74,12 @@ class ParaphraseGPT(nn.Module):
 
     'Takes a batch of sentences and produces embeddings for them.'
     ### YOUR CODE HERE
-    raise NotImplementedError
+    # encode the cloze-style prompt with GPT.
+    gpt_outputs = self.gpt(input_ids, attention_mask)
+    last_token = gpt_outputs['last_token']
+    # project to binary logits used by cross-entropy during training.
+    logits = self.paraphrase_detection_head(last_token)
+    return logits
 
 
 

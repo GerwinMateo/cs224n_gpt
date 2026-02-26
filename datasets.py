@@ -23,6 +23,9 @@ def preprocess_string(s):
                   .replace('\'', ' \'')
                   .split())
 
+def build_paraphrase_prompt(s1, s2):
+  return f'Is "{s1}" a paraphrase of "{s2}"? Answer "yes" or "no": '
+
 
 class ParaphraseDetectionDataset(Dataset):
   def __init__(self, dataset, args):
@@ -40,13 +43,11 @@ class ParaphraseDetectionDataset(Dataset):
   def collate_fn(self, all_data):
     sent1 = [x[0] for x in all_data]
     sent2 = [x[1] for x in all_data]
-    # labels = torch.LongTensor([x[2] for x in all_data])
-    labels = ['yes' if label == 1 else 'no' for label in [x[2] for x in all_data]]
-    labels = self.tokenizer(labels, return_tensors='pt', padding=True, truncation=True)['input_ids']
+    # Keep numeric class ids (0/1) so loss = cross_entropy(logits, labels) matches model output shape [B, 2].
+    labels = torch.LongTensor([x[2] for x in all_data])
     sent_ids = [x[3] for x in all_data]
 
-    cloze_style_sents = [f'Question 1: "{s1}"\nQuestion 2: "{s2}\nAre these questions asking the same thing?\n' for
-                         (s1, s2) in zip(sent1, sent2)]
+    cloze_style_sents = [build_paraphrase_prompt(s1, s2) for (s1, s2) in zip(sent1, sent2)]
     encoding = self.tokenizer(cloze_style_sents, return_tensors='pt', padding=True, truncation=True)
 
     token_ids = torch.LongTensor(encoding['input_ids'])
@@ -80,8 +81,7 @@ class ParaphraseDetectionTestDataset(Dataset):
     sent2 = [x[1] for x in all_data]
     sent_ids = [x[2] for x in all_data]
 
-    cloze_style_sents = [f'Is "{s1}" a paraphrase of "{s2}"? Answer "yes" or "no": ' for (s1, s2) in
-                         zip(sent1, sent2)]
+    cloze_style_sents = [build_paraphrase_prompt(s1, s2) for (s1, s2) in zip(sent1, sent2)]
 
     encoding = self.tokenizer(cloze_style_sents, return_tensors='pt', padding=True, truncation=True)
 
