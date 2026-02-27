@@ -75,11 +75,10 @@ class ParaphraseGPT(nn.Module):
     'Takes a batch of sentences and produces embeddings for them.'
     ### YOUR CODE HERE
     # encode the cloze-style prompt with GPT.
-    gpt_outputs = self.gpt(input_ids, attention_mask)
-    last_token = gpt_outputs['last_token']
-    # project to binary logits used by cross-entropy during training.
-    logits = self.paraphrase_detection_head(last_token)
-    return logits
+    gptOutput = self.gpt(input_ids, attention_mask)
+    lastToken = gptOutput['last_token']
+    scores = self.paraphrase_detection_head(lastToken)
+    return scores
 
 
 

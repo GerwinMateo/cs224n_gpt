@@ -55,7 +55,7 @@ class GPT2SentimentClassifier(torch.nn.Module):
 
     ### TODO: Create any instance variables you need to classify the sentiment of BERT embeddings.
     ### YOUR CODE HERE
-    # these layers turn GPT's final token representation into sentiment scores.
+    # classification head
     self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
     self.classifier = torch.nn.Linear(config.hidden_size, config.num_labels)
 
@@ -67,13 +67,15 @@ class GPT2SentimentClassifier(torch.nn.Module):
     ###       HINT: You should consider what is an appropriate return value given that
     ###       the training loop currently uses F.cross_entropy as the loss function.
     ### YOUR CODE HERE
-    # Get contextualized token representations.
-    gpt_outputs = self.gpt(input_ids, attention_mask)
-    # Use the representation of the final non-padding token for sentence sentiment.
-    last_token = gpt_outputs['last_token']
-    # Convert that representation into one score per sentiment class.
-    last_token = self.dropout(last_token)
-    logits = self.classifier(last_token)
+    gptOutput = self.gpt(input_ids, attention_mask)
+
+    # final token embedding for each sentence
+    lastTokenEmbedding = gptOutput['last_token']
+
+    # apply dropout then map to sentiment labels
+    dropoutOutput = self.dropout(lastTokenEmbedding)
+    logits = self.classifier(dropoutOutput)
+
     return logits
 
 
@@ -373,7 +375,7 @@ def get_args():
 if __name__ == "__main__":
   args = get_args()
   seed_everything(args.seed)
-
+  """
   print('Training Sentiment Classifier on SST...')
   config = SimpleNamespace(
     filepath='sst-classifier.pt',
@@ -394,7 +396,7 @@ if __name__ == "__main__":
 
   print('Evaluating on SST...')
   test(config)
-
+  """
   print('Training Sentiment Classifier on cfimdb...')
   config = SimpleNamespace(
     filepath='cfimdb-classifier.pt',
