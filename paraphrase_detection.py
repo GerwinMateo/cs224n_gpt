@@ -291,6 +291,8 @@ if __name__ == "__main__":
   else:
     loraTag = ''
   args.filepath = f'{args.epochs}-{args.lr}{loraTag}-paraphrase.pt'
+  args.para_dev_out = f'predictions/para{loraTag}-dev-output.csv'
+  args.para_test_out = f'predictions/para{loraTag}-test-output.csv'
   seed_everything(args.seed)  # Fix the seed for reproducibility.
   train(args)
   test(args)

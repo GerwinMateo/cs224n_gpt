@@ -315,6 +315,7 @@ if __name__ == "__main__":
   else:
     loraTag = ''
   args.filepath = f'{args.epochs}-{args.lr}{loraTag}-sonnet.pt'
+  args.sonnet_out = f'predictions/generated_sonnets{loraTag}.txt'
   seed_everything(args.seed)  # Fix the seed for reproducibility.
   train(args)
   generate_submission_sonnets(args)
