@@ -121,6 +121,14 @@ class SonnetGPT(nn.Module):
     generated_output = self.tokenizer.decode(token_ids[0].cpu().numpy().tolist())[3:]
     return token_ids, generated_output
 
+# sets up LoRA or PEFT for the model
+def setupLora(model, args):
+  targetModules = [m.strip() for m in args.lora_target_modules.split(',')]
+  if args.use_peft:
+    peftConfig = LoraConfig(r=args.lora_rank, lora_alpha=args.lora_alpha, target_modules=targetModules, lora_dropout=0.05, bias="none")
+    model.gpt = get_peft_model(model.gpt, peftConfig)
+  elif args.use_lora:
+    applyLora(model.gpt, targetModules, rank=args.lora_rank, alpha=args.lora_alpha)
 
 def save_model(model, optimizer, args, filepath):
   save_info = {
@@ -150,20 +158,9 @@ def train(args):
   args = add_arguments(args)
   model = SonnetGPT(args)
 
-  if args.use_peft:
-    targetModules = [m.strip() for m in args.lora_target_modules.split(',')]
-    peftConfig = LoraConfig(
-      r=args.lora_rank,
-      lora_alpha=args.lora_alpha,
-      target_modules=targetModules,
-      lora_dropout=0.05,
-      bias="none",
-    )
-    model.gpt = get_peft_model(model.gpt, peftConfig)
-    model.gpt.print_trainable_parameters()
-  elif args.use_lora:
-    targetModules = [m.strip() for m in args.lora_target_modules.split(',')]
-    applyLora(model.gpt, targetModules, rank=args.lora_rank, alpha=args.lora_alpha)
+  # checks if we're using LoRA or PEFT
+  if args.use_peft or args.use_lora:
+    setupLora(model, args)
     printTrainableParams(model)
 
   model = model.to(device)
@@ -218,19 +215,10 @@ def generate_submission_sonnets(args):
   savedArgs = saved['args']
 
   model = SonnetGPT(savedArgs)
-  if getattr(savedArgs, 'use_peft', False):
-    targetModules = [m.strip() for m in savedArgs.lora_target_modules.split(',')]
-    peftConfig = LoraConfig(
-      r=savedArgs.lora_rank,
-      lora_alpha=savedArgs.lora_alpha,
-      target_modules=targetModules,
-      lora_dropout=0.05,
-      bias="none",
-    )
-    model.gpt = get_peft_model(model.gpt, peftConfig)
-  elif getattr(savedArgs, 'use_lora', False):
-    targetModules = [m.strip() for m in savedArgs.lora_target_modules.split(',')]
-    applyLora(model.gpt, targetModules, rank=savedArgs.lora_rank, alpha=savedArgs.lora_alpha)
+
+  # checks if we're using LoRA or PEFT
+  if savedArgs.use_peft or savedArgs.use_lora:
+    setupLora(model, savedArgs)
   model.load_state_dict(saved['model'])
   model = model.to(device)
   model.eval()

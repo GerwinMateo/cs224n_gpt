@@ -75,7 +75,6 @@ class ParaphraseGPT(nn.Module):
      of 3919) for examples that are not paraphrases.
     """
 
-    'Takes a batch of sentences and produces embeddings for them.'
     ### YOUR CODE HERE
     # encode the cloze-style prompt with GPT.
     gptOutput = self.gpt(input_ids, attention_mask)
@@ -83,6 +82,17 @@ class ParaphraseGPT(nn.Module):
     scores = self.paraphrase_detection_head(lastToken)
     return scores
 
+
+# sets up LoRA or PEFT for the model
+def setupLora(model, args):
+  targetModules = [m.strip() for m in args.lora_target_modules.split(',')]
+  if args.use_peft:
+    peftConfig = LoraConfig(r=args.lora_rank, lora_alpha=args.lora_alpha,target_modules=targetModules, lora_dropout=0.05, bias="none")
+    model.gpt = get_peft_model(model.gpt, peftConfig)
+  elif args.use_lora:
+    applyLora(model.gpt, targetModules, rank=args.lora_rank, alpha=args.lora_alpha)
+  for param in model.paraphrase_detection_head.parameters():
+    param.requires_grad = True
 
 
 def save_model(model, optimizer, args, filepath):
@@ -117,24 +127,9 @@ def train(args):
   args = add_arguments(args)
   model = ParaphraseGPT(args)
 
-  if args.use_peft:
-    targetModules = [m.strip() for m in args.lora_target_modules.split(',')]
-    peftConfig = LoraConfig(
-      r=args.lora_rank,
-      lora_alpha=args.lora_alpha,
-      target_modules=targetModules,
-      lora_dropout=0.05,
-      bias="none",
-    )
-    model.gpt = get_peft_model(model.gpt, peftConfig)
-    for param in model.paraphrase_detection_head.parameters():
-      param.requires_grad = True
-    model.gpt.print_trainable_parameters()
-  elif args.use_lora:
-    targetModules = [m.strip() for m in args.lora_target_modules.split(',')]
-    applyLora(model.gpt, targetModules, rank=args.lora_rank, alpha=args.lora_alpha)
-    for param in model.paraphrase_detection_head.parameters():
-      param.requires_grad = True
+  # checks if we're using LoRA or PEFT
+  if args.use_peft or args.use_lora:
+    setupLora(model, args)
     printTrainableParams(model)
 
   model = model.to(device)
@@ -188,21 +183,9 @@ def test(args):
   savedArgs = saved['args']
 
   model = ParaphraseGPT(savedArgs)
-  if getattr(savedArgs, 'use_peft', False):
-    targetModules = [m.strip() for m in savedArgs.lora_target_modules.split(',')]
-    peftConfig = LoraConfig(
-      r=savedArgs.lora_rank,
-      lora_alpha=savedArgs.lora_alpha,
-      target_modules=targetModules,
-      lora_dropout=0.05,
-      bias="none",
-    )
-    model.gpt = get_peft_model(model.gpt, peftConfig)
-  elif getattr(savedArgs, 'use_lora', False):
-    targetModules = [m.strip() for m in savedArgs.lora_target_modules.split(',')]
-    applyLora(model.gpt, targetModules, rank=savedArgs.lora_rank, alpha=savedArgs.lora_alpha)
-    for param in model.paraphrase_detection_head.parameters():
-      param.requires_grad = True
+  # checks if we're using LoRA or PEFT
+  if savedArgs.use_peft or savedArgs.use_lora:
+    setupLora(model, savedArgs)
   model.load_state_dict(saved['model'])
   model = model.to(device)
   model.eval()
