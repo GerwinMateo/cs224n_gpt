@@ -14,6 +14,9 @@ class PretrainedConfig(object):
   model_type: str = ""
   is_composition: bool = False
 
+  def get(self, key, default=None):
+    return getattr(self, key, default)
+
   def __init__(self, **kwargs):
     # Attributes with defaults
     self.return_dict = kwargs.pop("return_dict", True)
