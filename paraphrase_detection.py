@@ -30,7 +30,10 @@ from datasets import (
 from evaluation import model_eval_paraphrase, model_test_paraphrase
 from models.gpt2 import GPT2Model
 
+from modules.lora import applyLora, printTrainableParams
 from optimizer import AdamW
+
+from peft import get_peft_model, LoraConfig
 
 TQDM_DISABLE = False
 
@@ -113,10 +116,34 @@ def train(args):
 
   args = add_arguments(args)
   model = ParaphraseGPT(args)
+
+  if args.use_peft:
+    targetModules = [m.strip() for m in args.lora_target_modules.split(',')]
+    peftConfig = LoraConfig(
+      r=args.lora_rank,
+      lora_alpha=args.lora_alpha,
+      target_modules=targetModules,
+      lora_dropout=0.05,
+      bias="none",
+    )
+    model.gpt = get_peft_model(model.gpt, peftConfig)
+    for param in model.paraphrase_detection_head.parameters():
+      param.requires_grad = True
+    model.gpt.print_trainable_parameters()
+  elif args.use_lora:
+    targetModules = [m.strip() for m in args.lora_target_modules.split(',')]
+    applyLora(model.gpt, targetModules, rank=args.lora_rank, alpha=args.lora_alpha)
+    for param in model.paraphrase_detection_head.parameters():
+      param.requires_grad = True
+    printTrainableParams(model)
+
   model = model.to(device)
 
   lr = args.lr
-  optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0.)
+  if args.use_lora or args.use_peft:
+    optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=lr, weight_decay=0.)
+  else:
+    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0.)
   best_dev_acc = 0
 
   # Run for the specified number of epochs.
@@ -158,8 +185,24 @@ def test(args):
   """Evaluate your model on the dev and test datasets; save the predictions to disk."""
   device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
   saved = torch.load(args.filepath, weights_only=False)
+  savedArgs = saved['args']
 
-  model = ParaphraseGPT(saved['args'])
+  model = ParaphraseGPT(savedArgs)
+  if getattr(savedArgs, 'use_peft', False):
+    targetModules = [m.strip() for m in savedArgs.lora_target_modules.split(',')]
+    peftConfig = LoraConfig(
+      r=savedArgs.lora_rank,
+      lora_alpha=savedArgs.lora_alpha,
+      target_modules=targetModules,
+      lora_dropout=0.05,
+      bias="none",
+    )
+    model.gpt = get_peft_model(model.gpt, peftConfig)
+  elif getattr(savedArgs, 'use_lora', False):
+    targetModules = [m.strip() for m in savedArgs.lora_target_modules.split(',')]
+    applyLora(model.gpt, targetModules, rank=savedArgs.lora_rank, alpha=savedArgs.lora_alpha)
+    for param in model.paraphrase_detection_head.parameters():
+      param.requires_grad = True
   model.load_state_dict(saved['model'])
   model = model.to(device)
   model.eval()
@@ -210,6 +253,12 @@ def get_args():
                       help="The model size as specified on hugging face. DO NOT use the xl model.",
                       choices=['gpt2', 'gpt2-medium', 'gpt2-large'], default='gpt2')
 
+  parser.add_argument("--use_lora", action='store_true')
+  parser.add_argument("--use_peft", action='store_true')
+  parser.add_argument("--lora_rank", type=int, default=4)
+  parser.add_argument("--lora_alpha", type=int, default=8)
+  parser.add_argument("--lora_target_modules", type=str, default="query,value")
+
   args = parser.parse_args()
   return args
 
@@ -235,7 +284,13 @@ def add_arguments(args):
 
 if __name__ == "__main__":
   args = get_args()
-  args.filepath = f'{args.epochs}-{args.lr}-paraphrase.pt'  # Save path.
+  if args.use_peft:
+    loraTag = f'-peft-r{args.lora_rank}'
+  elif args.use_lora:
+    loraTag = f'-lora-r{args.lora_rank}'
+  else:
+    loraTag = ''
+  args.filepath = f'{args.epochs}-{args.lr}{loraTag}-paraphrase.pt'
   seed_everything(args.seed)  # Fix the seed for reproducibility.
   train(args)
   test(args)

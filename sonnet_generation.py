@@ -25,7 +25,10 @@ from datasets import (
 )
 from models.gpt2 import GPT2Model
 
+from modules.lora import applyLora, printTrainableParams
 from optimizer import AdamW
+
+from peft import get_peft_model, LoraConfig
 
 TQDM_DISABLE = False
 
@@ -146,10 +149,30 @@ def train(args):
 
   args = add_arguments(args)
   model = SonnetGPT(args)
+
+  if args.use_peft:
+    targetModules = [m.strip() for m in args.lora_target_modules.split(',')]
+    peftConfig = LoraConfig(
+      r=args.lora_rank,
+      lora_alpha=args.lora_alpha,
+      target_modules=targetModules,
+      lora_dropout=0.05,
+      bias="none",
+    )
+    model.gpt = get_peft_model(model.gpt, peftConfig)
+    model.gpt.print_trainable_parameters()
+  elif args.use_lora:
+    targetModules = [m.strip() for m in args.lora_target_modules.split(',')]
+    applyLora(model.gpt, targetModules, rank=args.lora_rank, alpha=args.lora_alpha)
+    printTrainableParams(model)
+
   model = model.to(device)
 
   lr = args.lr
-  optimizer = AdamW(model.parameters(), lr=lr)
+  if args.use_lora or args.use_peft:
+    optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
+  else:
+    optimizer = AdamW(model.parameters(), lr=lr)
 
   # Run for the specified number of epochs.
   for epoch in range(args.epochs):
@@ -192,8 +215,22 @@ def train(args):
 def generate_submission_sonnets(args):
   device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
   saved = torch.load(f'{args.epochs-1}_{args.filepath}', weights_only=False)
+  savedArgs = saved['args']
 
-  model = SonnetGPT(saved['args'])
+  model = SonnetGPT(savedArgs)
+  if getattr(savedArgs, 'use_peft', False):
+    targetModules = [m.strip() for m in savedArgs.lora_target_modules.split(',')]
+    peftConfig = LoraConfig(
+      r=savedArgs.lora_rank,
+      lora_alpha=savedArgs.lora_alpha,
+      target_modules=targetModules,
+      lora_dropout=0.05,
+      bias="none",
+    )
+    model.gpt = get_peft_model(model.gpt, peftConfig)
+  elif getattr(savedArgs, 'use_lora', False):
+    targetModules = [m.strip() for m in savedArgs.lora_target_modules.split(',')]
+    applyLora(model.gpt, targetModules, rank=savedArgs.lora_rank, alpha=savedArgs.lora_alpha)
   model.load_state_dict(saved['model'])
   model = model.to(device)
   model.eval()
@@ -240,6 +277,12 @@ def get_args():
   parser.add_argument("--model_size", type=str, help="The model size as specified on hugging face.",
                       choices=['gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'], default='gpt2')
 
+  parser.add_argument("--use_lora", action='store_true')
+  parser.add_argument("--use_peft", action='store_true')
+  parser.add_argument("--lora_rank", type=int, default=4)
+  parser.add_argument("--lora_alpha", type=int, default=8)
+  parser.add_argument("--lora_target_modules", type=str, default="query,value")
+
   args = parser.parse_args()
   return args
 
@@ -265,7 +308,13 @@ def add_arguments(args):
 
 if __name__ == "__main__":
   args = get_args()
-  args.filepath = f'{args.epochs}-{args.lr}-sonnet.pt'  # Save path.
+  if args.use_peft:
+    loraTag = f'-peft-r{args.lora_rank}'
+  elif args.use_lora:
+    loraTag = f'-lora-r{args.lora_rank}'
+  else:
+    loraTag = ''
+  args.filepath = f'{args.epochs}-{args.lr}{loraTag}-sonnet.pt'
   seed_everything(args.seed)  # Fix the seed for reproducibility.
   train(args)
   generate_submission_sonnets(args)
