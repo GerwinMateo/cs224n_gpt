@@ -8,6 +8,7 @@ trains your SonnetGPT model and writes the required submission files.
 '''
 
 import argparse
+import os
 import random
 import torch
 
@@ -23,6 +24,7 @@ from einops import rearrange
 from datasets import (
   SonnetsDataset,
 )
+from evaluation import test_sonnet
 from models.gpt2 import GPT2Model
 
 from modules.lora import applyLora, printTrainableParams
@@ -75,7 +77,8 @@ class SonnetGPT(nn.Module):
       return param.device
 
   @torch.no_grad()
-  def generate(self, encoding, temperature=0.7, top_p=0.9, max_length=128):
+  def generate(self, encoding, temperature=0.6, top_p=0.9, max_length=140,
+               repetition_penalty=1.25):
     """
     Generates an original sonnet using top-p sampling and softmax temperature.
 
@@ -87,10 +90,17 @@ class SonnetGPT(nn.Module):
     attention_mask = torch.ones(token_ids.shape, dtype=torch.int64).to(self.get_device())
 
 
-    for _ in range(max_length):
+    for _ in range(max_length - token_ids.shape[1]):
       # Forward pass to get logits
       logits_sequence = self.forward(token_ids, attention_mask)
       logits_last_token = logits_sequence[:, -1, :] / temperature  # Apply temperature scaling
+
+      # Penalize tokens that have already appeared to reduce repetition
+      for tokenId in set(token_ids[0].tolist()):
+        if logits_last_token[0, tokenId] > 0:
+          logits_last_token[0, tokenId] /= repetition_penalty
+        else:
+          logits_last_token[0, tokenId] *= repetition_penalty
 
       # Convert logits to probabilities
       probs = torch.nn.functional.softmax(logits_last_token, dim=-1)
@@ -118,14 +128,13 @@ class SonnetGPT(nn.Module):
         [attention_mask, torch.ones((1, 1), dtype=torch.int64).to(self.get_device())], dim=1
       )
 
-    generated_output = self.tokenizer.decode(token_ids[0].cpu().numpy().tolist())[3:]
+    generated_output = self.tokenizer.decode(token_ids[0].cpu().numpy().tolist(), skip_special_tokens=True)
     return token_ids, generated_output
 
-# sets up LoRA or PEFT for the model
 def setupLora(model, args):
   targetModules = [m.strip() for m in args.lora_target_modules.split(',')]
   if args.use_peft:
-    peftConfig = LoraConfig(r=args.lora_rank, lora_alpha=args.lora_alpha, target_modules=targetModules, lora_dropout=0.05, bias="none")
+    peftConfig = LoraConfig(r=args.lora_rank, lora_alpha=args.lora_alpha, target_modules=targetModules, lora_dropout=0.01, bias="none")
     model.gpt = get_peft_model(model.gpt, peftConfig)
   elif args.use_lora:
     applyLora(model.gpt, targetModules, rank=args.lora_rank, alpha=args.lora_alpha)
@@ -142,6 +151,26 @@ def save_model(model, optimizer, args, filepath):
 
   torch.save(save_info, filepath)
   print(f"save the model to {filepath}")
+
+
+def evaluateDevChrf(model, args, device, tmpPath='predictions/_tmp_dev_sonnets.txt'):
+  model.eval()
+  devDataset = SonnetsDataset(args.dev_sonnet_path)
+  generatedSonnets = []
+  for batch in devDataset:
+    encoding = model.tokenizer(batch[1], return_tensors='pt', padding=False, truncation=True).to(device)
+    output = model.generate(encoding['input_ids'], temperature=args.temperature,
+                            top_p=args.top_p, repetition_penalty=args.repetition_penalty)
+    generatedSonnets.append((batch[0], f'{output[1]}\n\n'))
+
+  with open(tmpPath, 'w') as f:
+    f.write("--Generated Sonnets-- \n\n")
+    for sonnet in generatedSonnets:
+      f.write(f"\n{sonnet[0]}\n")
+      f.write(sonnet[1])
+
+  chrf = test_sonnet(tmpPath, args.gold_sonnet_path)
+  return chrf
 
 
 def train(args):
@@ -167,9 +196,13 @@ def train(args):
 
   lr = args.lr
   if args.use_lora or args.use_peft:
+    lr = args.lora_lr if args.lora_lr is not None else (3e-4 if args.lr == 1e-5 else args.lr)
+    print(f"LoRA/PEFT: lr={lr} (override with --lora_lr)")
     optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
   else:
     optimizer = AdamW(model.parameters(), lr=lr)
+
+  bestChrf = 0
 
   # Run for the specified number of epochs.
   for epoch in range(args.epochs):
@@ -190,28 +223,45 @@ def train(args):
       labels = b_ids[:, 1:].contiguous().flatten()  # Ignore the first token to compose the labels.
       loss = F.cross_entropy(logits, labels, reduction='mean')
       loss.backward()
+      torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
       optimizer.step()
 
       train_loss += loss.item()
       num_batches += 1
 
     train_loss = train_loss / num_batches
-    print(f"Epoch {epoch}: train loss :: {train_loss :.3f}.")
+
+    # Evaluate dev CHRF each epoch to track best checkpoint
+    devChrf = evaluateDevChrf(model, args, device)
+    print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, dev chrf :: {devChrf :.2f}")
+
+    if devChrf > bestChrf:
+      bestChrf = devChrf
+      save_model(model, optimizer, args, f'best_{args.filepath}')
+      print(f"  New best chrf! Saved to best_{args.filepath}")
+
+    # also save latest so we can resume / inspect
+    save_model(model, optimizer, args, f'latest_{args.filepath}')
+
     print('Generating several output sonnets...')
     model.eval()
     for batch in held_out_sonnet_dataset:
       encoding = model.tokenizer(batch[1], return_tensors='pt', padding=True, truncation=True).to(device)
-      output = model.generate(encoding['input_ids'], temperature=args.temperature, top_p=args.top_p)
+      output = model.generate(encoding['input_ids'], temperature=args.temperature,
+                              top_p=args.top_p, repetition_penalty=args.repetition_penalty)
       print(f'{batch[1]}{output[1]}\n\n')
 
-    # TODO: consider a stopping condition to prevent overfitting on the small dataset of sonnets.
-    save_model(model, optimizer, args, f'{epoch}_{args.filepath}')
+  print(f"Training done. Best dev chrf: {bestChrf :.2f}")
 
 
 @torch.no_grad()
 def generate_submission_sonnets(args):
   device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
-  saved = torch.load(f'{args.epochs-1}_{args.filepath}', weights_only=False)
+  bestPath = f'best_{args.filepath}'
+  if not os.path.exists(bestPath):
+    bestPath = f'latest_{args.filepath}'
+    print(f"best checkpoint not found, falling back to {bestPath}")
+  saved = torch.load(bestPath, weights_only=False)
   savedArgs = saved['args']
 
   model = SonnetGPT(savedArgs)
@@ -230,12 +280,13 @@ def generate_submission_sonnets(args):
   for batch in held_out_sonnet_dataset:
     sonnet_id = batch[0]
     encoding = model.tokenizer(batch[1], return_tensors='pt', padding=False, truncation=True).to(device)
-    output = model.generate(encoding['input_ids'], temperature=args.temperature, top_p=args.top_p)[0][0]
-    decoded_output = model.tokenizer.decode(output)
-    full_sonnet = f'{decoded_output}\n\n'
+    output = model.generate(encoding['input_ids'], temperature=args.temperature,
+                            top_p=args.top_p, repetition_penalty=args.repetition_penalty)
+    generatedText = output[1]
+    full_sonnet = f'{generatedText}\n\n'
     generated_sonnets.append((sonnet_id, full_sonnet))
 
-    print(f'{decoded_output}\n\n')
+    print(f'{generatedText}\n\n')
 
   with open(args.sonnet_out, "w+") as f:
     f.write(f"--Generated Sonnets-- \n\n")
@@ -249,18 +300,21 @@ def get_args():
 
   parser.add_argument("--sonnet_path", type=str, default="data/sonnets.txt")
   parser.add_argument("--held_out_sonnet_path", type=str, default="data/sonnets_held_out.txt")
+  parser.add_argument("--dev_sonnet_path", type=str, default="data/sonnets_held_out_dev.txt")
+  parser.add_argument("--gold_sonnet_path", type=str, default="data/TRUE_sonnets_held_out_dev.txt")
   parser.add_argument("--sonnet_out", type=str, default="predictions/generated_sonnets.txt")
 
   parser.add_argument("--seed", type=int, default=11711)
-  parser.add_argument("--epochs", type=int, default=10)
+  parser.add_argument("--epochs", type=int, default=30)
   parser.add_argument("--use_gpu", action='store_true')
 
   # Generation parameters.
-  parser.add_argument("--temperature", type=float, help="softmax temperature.", default=1.2)
+  parser.add_argument("--temperature", type=float, help="softmax temperature.", default=0.6)
   parser.add_argument("--top_p", type=float, help="Cumulative probability distribution for nucleus sampling.",
                       default=0.9)
+  parser.add_argument("--repetition_penalty", type=float, help="penalty for repeated tokens.", default=1.25)
 
-  parser.add_argument("--batch_size", help='The training batch size.', type=int, default=8)
+  parser.add_argument("--batch_size", help='The training batch size.', type=int, default=4)
   parser.add_argument("--lr", type=float, help="learning rate", default=1e-5)
   parser.add_argument("--model_size", type=str, help="The model size as specified on hugging face.",
                       choices=['gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'], default='gpt2')
@@ -269,7 +323,8 @@ def get_args():
   parser.add_argument("--use_peft", action='store_true')
   parser.add_argument("--lora_rank", type=int, default=16)
   parser.add_argument("--lora_alpha", type=int, default=32)
-  parser.add_argument("--lora_target_modules", type=str, default="query,key,value")
+  parser.add_argument("--lora_target_modules", type=str, default="query,key,value,attention_dense")
+  parser.add_argument("--lora_lr", type=float, default=None)
 
   args = parser.parse_args()
   return args
