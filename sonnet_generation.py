@@ -89,11 +89,19 @@ class SonnetGPT(nn.Module):
     token_ids = encoding.to(self.get_device())
     attention_mask = torch.ones(token_ids.shape, dtype=torch.int64).to(self.get_device())
 
+    temperature = float(temperature)
+    if not np.isfinite(temperature) or temperature <= 0:
+      temperature = 1.0
+    top_p = float(top_p)
+    if not np.isfinite(top_p):
+      top_p = 1.0
+    top_p = min(max(top_p, 0.0), 1.0)
 
     for _ in range(max_length - token_ids.shape[1]):
       # Forward pass to get logits
       logits_sequence = self.forward(token_ids, attention_mask)
-      logits_last_token = logits_sequence[:, -1, :] / temperature  # Apply temperature scaling
+      logits_last_token = logits_sequence[:, -1, :].float() / temperature  # Apply temperature scaling
+      logits_last_token = torch.nan_to_num(logits_last_token, nan=-1e9, posinf=1e9, neginf=-1e9)
 
       # Penalize tokens that have already appeared to reduce repetition
       for tokenId in set(token_ids[0].tolist()):
@@ -104,6 +112,13 @@ class SonnetGPT(nn.Module):
 
       # Convert logits to probabilities
       probs = torch.nn.functional.softmax(logits_last_token, dim=-1)
+      probs = torch.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
+      probs_sum = probs.sum(dim=-1, keepdim=True)
+      if not torch.isfinite(probs_sum).all() or (probs_sum <= 0).any():
+        probs = torch.zeros_like(probs)
+        probs[0, torch.argmax(logits_last_token, dim=-1).item()] = 1.0
+      else:
+        probs = probs / probs_sum
 
       # Top-p (nucleus) sampling
       sorted_probs, sorted_indices = torch.sort(probs, descending=True)
@@ -112,7 +127,13 @@ class SonnetGPT(nn.Module):
       top_p_mask[..., 1:] = top_p_mask[..., :-1].clone()  # Shift mask right for proper thresholding
       top_p_mask[..., 0] = True  # Always include the highest probability token
       filtered_probs = sorted_probs * top_p_mask  # Zero out unlikely tokens
-      filtered_probs /= filtered_probs.sum(dim=-1, keepdim=True)  # Normalize probabilities
+      filtered_probs = torch.nan_to_num(filtered_probs, nan=0.0, posinf=0.0, neginf=0.0)
+      filtered_sum = filtered_probs.sum(dim=-1, keepdim=True)
+      if not torch.isfinite(filtered_sum).all() or (filtered_sum <= 0).any():
+        filtered_probs = torch.zeros_like(filtered_probs)
+        filtered_probs[..., 0] = 1.0
+      else:
+        filtered_probs = filtered_probs / filtered_sum
 
       # Sample from filtered distribution
       sampled_index = torch.multinomial(filtered_probs, 1)
@@ -134,7 +155,7 @@ class SonnetGPT(nn.Module):
 def setupLora(model, args):
   targetModules = [m.strip() for m in args.lora_target_modules.split(',')]
   if args.use_peft:
-    peftConfig = LoraConfig(r=args.lora_rank, lora_alpha=args.lora_alpha, target_modules=targetModules, lora_dropout=0.01, bias="none")
+    peftConfig = LoraConfig(r=args.lora_rank, lora_alpha=args.lora_alpha, target_modules=targetModules, lora_dropout=0.05, bias="none")
     model.gpt = get_peft_model(model.gpt, peftConfig)
   elif args.use_lora:
     applyLora(model.gpt, targetModules, rank=args.lora_rank, alpha=args.lora_alpha)
@@ -196,8 +217,9 @@ def train(args):
 
   lr = args.lr
   if args.use_lora or args.use_peft:
-    lr = args.lora_lr if args.lora_lr is not None else (3e-4 if args.lr == 1e-5 else args.lr)
-    print(f"LoRA/PEFT: lr={lr} (override with --lora_lr)")
+    if lr == 1e-5:
+      lr = 1e-4
+      print(f"LoRA/PEFT detected: bumping lr from 1e-5 to {lr}")
     optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
   else:
     optimizer = AdamW(model.parameters(), lr=lr)
@@ -317,14 +339,13 @@ def get_args():
   parser.add_argument("--batch_size", help='The training batch size.', type=int, default=4)
   parser.add_argument("--lr", type=float, help="learning rate", default=1e-5)
   parser.add_argument("--model_size", type=str, help="The model size as specified on hugging face.",
-                      choices=['gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'], default='gpt2')
+                      choices=['gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'], default='gpt2-medium')
 
   parser.add_argument("--use_lora", action='store_true')
   parser.add_argument("--use_peft", action='store_true')
-  parser.add_argument("--lora_rank", type=int, default=16)
-  parser.add_argument("--lora_alpha", type=int, default=32)
-  parser.add_argument("--lora_target_modules", type=str, default="query,key,value,attention_dense")
-  parser.add_argument("--lora_lr", type=float, default=None)
+  parser.add_argument("--lora_rank", type=int, default=8)
+  parser.add_argument("--lora_alpha", type=int, default=16)
+  parser.add_argument("--lora_target_modules", type=str, default="query,key,value")
 
   args = parser.parse_args()
   return args
